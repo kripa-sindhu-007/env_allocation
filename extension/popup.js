@@ -9,6 +9,14 @@ const NAV = {
   Backend: ['APIs', 'Portal'],
   Frontend: ['PWA', 'Portal'],
 };
+
+// Human-readable titles for each tab
+const TAB_TITLES = {
+  'Backend-APIs':   'Backend API Servers',
+  'Backend-Portal': 'Admin Portal — Backend',
+  'Frontend-PWA':   'Progressive Web Apps',
+  'Frontend-Portal':'Admin Portal — Frontend',
+};
 const GROUPS = Object.keys(NAV);
 
 // ============================================
@@ -20,6 +28,7 @@ let activeGroup = GROUPS[0];
 let activeSubTab = NAV[activeGroup][0];
 let openHistoryId = null;
 let editingNoteId = null;
+let reservingEnvId = null;
 let searchQuery = '';
 let refreshTimer = null;
 
@@ -32,7 +41,6 @@ const $groupBar = document.getElementById('group-bar');
 const $tabs = document.getElementById('tab-bar');
 const $context = document.getElementById('context-banner');
 const $envList = document.getElementById('env-list');
-const $activity = document.getElementById('activity-list');
 const $userDisplay = document.getElementById('user-display');
 const $loading = document.getElementById('loading');
 const $error = document.getElementById('error-banner');
@@ -109,18 +117,15 @@ function showApp() {
 
   renderNav();
   loadEnvironments();
-  loadActivity();
 
   // Auto-refresh every 30s
   refreshTimer = setInterval(() => {
     loadEnvironments();
-    loadActivity();
   }, 30000);
 
   // Manual refresh
   document.getElementById('refresh-btn').addEventListener('click', () => {
     loadEnvironments();
-    loadActivity();
   });
 
   // Click username to edit
@@ -193,8 +198,12 @@ function renderNav() {
     .join('');
 
   // Context banner
+  const titleKey = activeGroup + '-' + activeSubTab;
+  const tabTitle = TAB_TITLES[titleKey] || (activeGroup + ' ' + activeSubTab);
   $context.className = 'context-banner ' + theme;
-  $context.textContent = '$ ~/' + activeGroup.toLowerCase() + '/' + activeSubTab.toLowerCase();
+  $context.innerHTML =
+    '<span class="context-title">' + tabTitle + '</span>' +
+    '<span class="context-path">$ ~/' + activeGroup.toLowerCase() + '/' + activeSubTab.toLowerCase() + '</span>';
 }
 
 function handleGroupClick(e) {
@@ -207,7 +216,6 @@ function handleGroupClick(e) {
   resetViewState();
   renderNav();
   renderEnvironments();
-  loadActivity();
 }
 
 function handleTabClick(e) {
@@ -219,12 +227,12 @@ function handleTabClick(e) {
   resetViewState();
   renderNav();
   renderEnvironments();
-  loadActivity();
 }
 
 function resetViewState() {
   openHistoryId = null;
   editingNoteId = null;
+  reservingEnvId = null;
   searchQuery = '';
   document.getElementById('search-input').value = '';
 }
@@ -256,26 +264,15 @@ async function loadEnvironments() {
   }
 }
 
-async function loadActivity() {
-  try {
-    const res = await fetch(
-      API_BASE + '/history?category=' + encodeURIComponent(getCategoryKey())
-    );
-    const data = await res.json();
-    renderActivity(data);
-  } catch (_) {
-    $activity.innerHTML =
-      '<div class="activity-empty">Could not load activity</div>';
-  }
-}
+const HISTORY_LIMIT = 5;
 
 async function loadHistory(envId) {
   const panel = document.getElementById('history-' + envId);
   if (!panel) return;
 
   try {
-    const res = await fetch(API_BASE + '/history?envId=' + envId);
-    const data = await res.json();
+    const res = await fetch(API_BASE + '/history?envId=' + envId + '&limit=' + HISTORY_LIMIT);
+    const data = (await res.json() || []).slice(0, HISTORY_LIMIT);
 
     if (!data.length) {
       panel.innerHTML = '<div class="history-empty">No activity yet</div>';
@@ -285,25 +282,23 @@ async function loadHistory(envId) {
     panel.innerHTML = data
       .map((h) => {
         const verb =
-          h.action === 'reserve'
-            ? 'reserved'
-            : h.action === 'release'
-              ? 'released'
-              : 'updated note on';
-        const noteText =
-          h.note ? ' &mdash; &quot;' + escapeHtml(h.note) + '&quot;' : '';
+          h.action === 'reserve' ? 'reserved' :
+          h.action === 'release' ? 'released' : 'updated note on';
+        const noteText = h.note ? ' &mdash; &quot;' + escapeHtml(h.note) + '&quot;' : '';
         return (
           '<div class="history-item"><strong>' +
-          escapeHtml(h.user_name) +
-          '</strong> ' +
-          verb +
-          noteText +
-          ' <span class="time">' +
-          relativeTime(h.created_at) +
-          '</span></div>'
+          escapeHtml(h.user_name) + '</strong> ' + verb + noteText +
+          ' <span class="time">' + relativeTime(h.created_at) + '</span></div>'
         );
       })
       .join('');
+
+    // Ask the server to purge entries beyond the limit
+    fetch(API_BASE + '/history/purge', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ envId, keepLast: HISTORY_LIMIT }),
+    }).catch(() => {});
   } catch (_) {
     panel.innerHTML = '<div class="history-empty">Failed to load</div>';
   }
@@ -374,19 +369,34 @@ function renderEnvironments() {
 
       // Details (in-use only)
       if (!isFree) {
+        // Title — shown prominently
+        if (env.note) {
+          html +=
+            '<div class="env-res-title">' +
+            escapeHtml(env.note) +
+            '</div>';
+        }
         html += '<div class="env-details">';
         html +=
           '<span class="env-owner">by ' + escapeHtml(env.owner) + '</span>';
-        if (env.note) {
-          html +=
-            '<span class="env-note">&quot;' +
-            escapeHtml(env.note) +
-            '&quot;</span>';
-        }
         if (isStale) {
           html += '<span class="stale-tag">stale</span>';
         }
         html += '</div>';
+      }
+
+      // Reserve title input (shown before confirming reservation)
+      if (isFree && reservingEnvId === env.id) {
+        html +=
+          '<div class="reserve-title-row">' +
+          '<input class="reserve-title-input" data-env-id="' +
+          env.id +
+          '" placeholder="What are you working on?">' +
+          '<button class="btn btn-reserve" data-action="confirm-reserve" data-env-id="' +
+          env.id +
+          '">Reserve</button>' +
+          '<button class="btn btn-cancel" data-action="cancel-reserve">Cancel</button>' +
+          '</div>';
       }
 
       // Note editing
@@ -408,10 +418,12 @@ function renderEnvironments() {
       // Action buttons
       html += '<div class="env-actions">';
       if (isFree) {
-        html +=
-          '<button class="btn btn-reserve" data-action="reserve" data-env-id="' +
-          env.id +
-          '">Reserve</button>';
+        if (reservingEnvId !== env.id) {
+          html +=
+            '<button class="btn btn-reserve" data-action="start-reserve" data-env-id="' +
+            env.id +
+            '">Reserve</button>';
+        }
       } else {
         html +=
           '<button class="btn btn-release" data-action="release" data-env-id="' +
@@ -426,17 +438,15 @@ function renderEnvironments() {
       }
       html +=
         '<button class="btn btn-history" data-action="toggle-history" data-env-id="' +
-        env.id +
-        '">' +
+        env.id + '">' +
         (openHistoryId === env.id ? '&#9650;' : '&#9660;') +
         ' History</button>';
       html += '</div>';
 
-      // History panel
+      // History panel (last 5 entries only)
       if (openHistoryId === env.id) {
         html +=
-          '<div class="history-panel" id="history-' +
-          env.id +
+          '<div class="history-panel" id="history-' + env.id +
           '"><div class="spinner" style="width:16px;height:16px;border-width:2px;margin:4px auto"></div></div>';
       }
 
@@ -461,37 +471,13 @@ function renderEnvironments() {
     );
     if (inp) inp.focus();
   }
-}
 
-function renderActivity(data) {
-  if (!data || !data.length) {
-    $activity.innerHTML = '<div class="activity-empty">No activity yet</div>';
-    return;
+  if (reservingEnvId) {
+    const inp = $envList.querySelector(
+      '.reserve-title-input[data-env-id="' + reservingEnvId + '"]'
+    );
+    if (inp) inp.focus();
   }
-
-  $activity.innerHTML = data
-    .map((h) => {
-      const verb =
-        h.action === 'reserve'
-          ? 'reserved'
-          : h.action === 'release'
-            ? 'released'
-            : 'updated note on';
-      const envName =
-        h.environments && h.environments.name ? h.environments.name : '?';
-      return (
-        '<div class="activity-item"><strong>' +
-        escapeHtml(h.user_name) +
-        '</strong> ' +
-        verb +
-        ' <strong>' +
-        escapeHtml(envName) +
-        '</strong> <span class="time">' +
-        relativeTime(h.created_at) +
-        '</span></div>'
-      );
-    })
-    .join('');
 }
 
 // ============================================
@@ -505,8 +491,20 @@ function handleEnvClick(e) {
   const envId = Number(btn.dataset.envId);
 
   switch (action) {
-    case 'reserve':
-      reserveEnv(envId);
+    case 'start-reserve':
+      reservingEnvId = envId;
+      renderEnvironments();
+      break;
+    case 'confirm-reserve': {
+      const inp = $envList.querySelector('.reserve-title-input[data-env-id="' + envId + '"]');
+      const title = inp ? inp.value.trim() : '';
+      reservingEnvId = null;
+      reserveEnv(envId, title);
+      break;
+    }
+    case 'cancel-reserve':
+      reservingEnvId = null;
+      renderEnvironments();
       break;
     case 'release':
       releaseEnv(envId);
@@ -530,6 +528,18 @@ function handleEnvClick(e) {
 }
 
 function handleEnvKeydown(e) {
+  if (e.target.classList.contains('reserve-title-input')) {
+    if (e.key === 'Enter') {
+      const envId = Number(e.target.dataset.envId);
+      const title = e.target.value.trim();
+      reservingEnvId = null;
+      reserveEnv(envId, title);
+    } else if (e.key === 'Escape') {
+      reservingEnvId = null;
+      renderEnvironments();
+    }
+    return;
+  }
   if (!e.target.classList.contains('note-input')) return;
   if (e.key === 'Enter') {
     saveNote(Number(e.target.dataset.envId));
@@ -542,13 +552,14 @@ function handleEnvKeydown(e) {
 // ============================================
 // Actions
 // ============================================
-async function reserveEnv(envId) {
+async function reserveEnv(envId, title) {
   const env = allEnvironments.find((e) => e.id === envId);
   if (!env || env.status === 'in-use') return;
 
   // Optimistic update
   env.status = 'in-use';
   env.owner = currentUser;
+  env.note = title || null;
   env.updated_at = new Date().toISOString();
   renderEnvironments();
 
@@ -564,9 +575,17 @@ async function reserveEnv(envId) {
       throw new Error(data.error || 'Failed to reserve');
     }
 
+    // Save title as note if provided
+    if (title) {
+      await fetch(API_BASE + '/update-note', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ envId, user: currentUser, note: title }),
+      });
+    }
+
     showToast('Reserved ' + env.name);
     await loadEnvironments();
-    loadActivity();
   } catch (err) {
     showToast('Reserve failed: ' + err.message, true);
     await loadEnvironments();
@@ -598,7 +617,6 @@ async function releaseEnv(envId) {
 
     showToast('Released ' + envName);
     await loadEnvironments();
-    loadActivity();
   } catch (err) {
     showToast('Release failed: ' + err.message, true);
     await loadEnvironments();
@@ -628,7 +646,6 @@ async function saveNote(envId) {
     });
 
     await loadEnvironments();
-    loadActivity();
   } catch (err) {
     showError('Failed to update note');
     await loadEnvironments();
