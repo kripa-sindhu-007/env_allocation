@@ -110,5 +110,5 @@ Your API is now live at `https://your-app.vercel.app/api`.
 
 - **Green** — environment is free
 - **Red** — environment is in use
-- **Amber** — in use for 4+ hours (stale)
+- **Amber** — in use for 7+ days (stale)
 
