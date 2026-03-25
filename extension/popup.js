@@ -9,20 +9,13 @@ const NAV = {
   Backend: ['APIs', 'Portal'],
   Frontend: ['PWA', 'Portal'],
 };
-
-// Human-readable titles for each tab
-const TAB_TITLES = {
-  'Backend-APIs':   'Backend API Servers',
-  'Backend-Portal': 'Admin Portal — Backend',
-  'Frontend-PWA':   'Progressive Web Apps',
-  'Frontend-Portal':'Admin Portal — Frontend',
-};
 const GROUPS = Object.keys(NAV);
 
 // ============================================
 // State
 // ============================================
 let currentUser = null;
+let currentRole = null;
 let allEnvironments = [];
 let activeGroup = GROUPS[0];
 let activeSubTab = NAV[activeGroup][0];
@@ -31,6 +24,9 @@ let editingNoteId = null;
 let reservingEnvId = null;
 let searchQuery = '';
 let refreshTimer = null;
+let pendingReserveEnvId = null;
+let qaUsers = [];
+let allNotifications = [];
 
 // ============================================
 // DOM refs
@@ -41,9 +37,15 @@ const $groupBar = document.getElementById('group-bar');
 const $tabs = document.getElementById('tab-bar');
 const $context = document.getElementById('context-banner');
 const $envList = document.getElementById('env-list');
+const $activity = document.getElementById('activity-list');
 const $userDisplay = document.getElementById('user-display');
 const $loading = document.getElementById('loading');
 const $error = document.getElementById('error-banner');
+const $reserveModal = document.getElementById('reserve-modal');
+const $notifWrapper = document.getElementById('notif-wrapper');
+const $notifBadge = document.getElementById('notif-badge');
+const $notifDropdown = document.getElementById('notif-dropdown');
+const $notifList = document.getElementById('notif-list');
 
 // ============================================
 // Init
@@ -53,6 +55,7 @@ document.addEventListener('DOMContentLoaded', init);
 async function init() {
   const stored = await chrome.storage.local.get([
     'username',
+    'userRole',
     'activeGroup',
     'activeSubTab',
   ]);
@@ -68,8 +71,9 @@ async function init() {
   } else {
     activeSubTab = NAV[activeGroup][0];
   }
-  if (stored.username) {
+  if (stored.username && stored.userRole) {
     currentUser = stored.username;
+    currentRole = stored.userRole;
     showApp();
   } else {
     showModal();
@@ -77,7 +81,7 @@ async function init() {
 }
 
 // ============================================
-// Username modal
+// Username + Role modal
 // ============================================
 function showModal() {
   $modal.style.display = 'flex';
@@ -85,16 +89,33 @@ function showModal() {
 
   const input = document.getElementById('username-input');
   const btn = document.getElementById('username-save');
+<<<<<<< HEAD
 
   btn.addEventListener('click', saveUsername);
   input.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') saveUsername();
+=======
+  const roleBtns = document.querySelectorAll('.role-btn');
+  let selectedRole = 'developer';
+
+  roleBtns.forEach((rb) => {
+    rb.addEventListener('click', () => {
+      roleBtns.forEach((b) => b.classList.remove('active'));
+      rb.classList.add('active');
+      selectedRole = rb.dataset.role;
+    });
+  });
+
+  btn.addEventListener('click', () => saveUsername(selectedRole));
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') saveUsername(selectedRole);
+>>>>>>> e495ff1b65262078fcc78906d8cce4ce0b3463e1
   });
 
   setTimeout(() => input.focus(), 50);
 }
 
-async function saveUsername() {
+async function saveUsername(role) {
   const input = document.getElementById('username-input');
   const name = input.value.trim();
   if (!name) {
@@ -103,7 +124,20 @@ async function saveUsername() {
   }
 
   currentUser = name;
-  await chrome.storage.local.set({ username: name });
+  currentRole = role;
+  await chrome.storage.local.set({ username: name, userRole: role });
+
+  // Register user in backend
+  try {
+    await fetch(API_BASE + '/users', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, role }),
+    });
+  } catch (_) {
+    // Non-blocking — user can still use the app
+  }
+
   showApp();
 }
 
@@ -115,17 +149,28 @@ function showApp() {
   $app.style.display = 'block';
   $userDisplay.textContent = currentUser;
 
+  // Show notification bell for QA users
+  if (currentRole === 'qa') {
+    $notifWrapper.style.display = 'block';
+    loadNotifications();
+  }
+
   renderNav();
   loadEnvironments();
+  loadActivity();
 
   // Auto-refresh every 30s
   refreshTimer = setInterval(() => {
     loadEnvironments();
+    loadActivity();
+    if (currentRole === 'qa') loadNotifications();
   }, 30000);
 
   // Manual refresh
   document.getElementById('refresh-btn').addEventListener('click', () => {
     loadEnvironments();
+    loadActivity();
+    if (currentRole === 'qa') loadNotifications();
   });
 
   // Click username to edit
@@ -135,6 +180,12 @@ function showApp() {
       currentUser = newName.trim();
       chrome.storage.local.set({ username: currentUser });
       $userDisplay.textContent = currentUser;
+      // Update backend
+      fetch(API_BASE + '/users', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: currentUser, role: currentRole }),
+      }).catch(() => {});
     }
   });
 
@@ -149,6 +200,21 @@ function showApp() {
   $tabs.addEventListener('click', handleTabClick);
   $envList.addEventListener('click', handleEnvClick);
   $envList.addEventListener('keydown', handleEnvKeydown);
+
+  // Reserve modal events
+  document.getElementById('reserve-confirm').addEventListener('click', confirmReserve);
+  document.getElementById('reserve-cancel').addEventListener('click', closeReserveModal);
+
+  // Notification bell events
+  document.getElementById('notif-btn').addEventListener('click', toggleNotifDropdown);
+  document.getElementById('notif-mark-all').addEventListener('click', markAllNotificationsRead);
+
+  // Close notification dropdown on outside click
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest('.notif-wrapper')) {
+      $notifDropdown.style.display = 'none';
+    }
+  });
 }
 
 // ============================================
@@ -204,6 +270,8 @@ function renderNav() {
   $context.innerHTML =
     '<span class="context-title">' + tabTitle + '</span>' +
     '<span class="context-path">$ ~/' + activeGroup.toLowerCase() + '/' + activeSubTab.toLowerCase() + '</span>';
+  $context.className = 'context-banner ' + theme;
+  $context.textContent = '$ ~/' + activeGroup.toLowerCase() + '/' + activeSubTab.toLowerCase();
 }
 
 function handleGroupClick(e) {
@@ -216,6 +284,7 @@ function handleGroupClick(e) {
   resetViewState();
   renderNav();
   renderEnvironments();
+  loadActivity();
 }
 
 function handleTabClick(e) {
@@ -227,6 +296,7 @@ function handleTabClick(e) {
   resetViewState();
   renderNav();
   renderEnvironments();
+  loadActivity();
 }
 
 function resetViewState() {
@@ -265,6 +335,18 @@ async function loadEnvironments() {
 }
 
 const HISTORY_LIMIT = 5;
+async function loadActivity() {
+  try {
+    const res = await fetch(
+      API_BASE + '/history?category=' + encodeURIComponent(getCategoryKey())
+    );
+    const data = await res.json();
+    renderActivity(data);
+  } catch (_) {
+    $activity.innerHTML =
+      '<div class="activity-empty">Could not load activity</div>';
+  }
+}
 
 async function loadHistory(envId) {
   const panel = document.getElementById('history-' + envId);
@@ -282,6 +364,7 @@ async function loadHistory(envId) {
     panel.innerHTML = data
       .map((h) => {
         const verb =
+<<<<<<< HEAD
           h.action === 'reserve' ? 'reserved' :
           h.action === 'release' ? 'released' : 'updated note on';
         const noteText = h.note ? ' &mdash; &quot;' + escapeHtml(h.note) + '&quot;' : '';
@@ -299,12 +382,142 @@ async function loadHistory(envId) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ envId, keepLast: HISTORY_LIMIT }),
     }).catch(() => {});
+=======
+          h.action === 'reserve'
+            ? 'reserved'
+            : h.action === 'release'
+              ? 'released'
+              : 'updated note on';
+        const noteText =
+          h.note ? ' &mdash; &quot;' + escapeHtml(h.note) + '&quot;' : '';
+        return (
+          '<div class="history-item"><strong>' +
+          escapeHtml(h.user_name) +
+          '</strong> ' +
+          verb +
+          noteText +
+          ' <span class="time">' +
+          relativeTime(h.created_at) +
+          '</span></div>'
+        );
+      })
+      .join('');
+>>>>>>> e495ff1b65262078fcc78906d8cce4ce0b3463e1
   } catch (_) {
     panel.innerHTML = '<div class="history-empty">Failed to load</div>';
   }
 }
 
 // ============================================
+<<<<<<< HEAD
+=======
+// QA Users loading (for reserve modal)
+// ============================================
+async function loadQAUsers() {
+  try {
+    const res = await fetch(API_BASE + '/users?role=qa');
+    if (!res.ok) return [];
+    qaUsers = await res.json();
+    return qaUsers;
+  } catch (_) {
+    return [];
+  }
+}
+
+// ============================================
+// Notifications
+// ============================================
+async function loadNotifications() {
+  try {
+    const res = await fetch(
+      API_BASE + '/notifications?user=' + encodeURIComponent(currentUser)
+    );
+    if (!res.ok) return;
+    allNotifications = await res.json();
+    renderNotifBadge();
+  } catch (_) {
+    // Silent fail
+  }
+}
+
+function getUnreadNotifications() {
+  return allNotifications.filter((n) => !n.is_read);
+}
+
+function renderNotifBadge() {
+  const count = getUnreadNotifications().length;
+  if (count > 0) {
+    $notifBadge.textContent = count > 99 ? '99+' : String(count);
+    $notifBadge.style.display = 'flex';
+  } else {
+    $notifBadge.style.display = 'none';
+  }
+}
+
+function toggleNotifDropdown(e) {
+  e.stopPropagation();
+  const isOpen = $notifDropdown.style.display === 'block';
+  $notifDropdown.style.display = isOpen ? 'none' : 'block';
+  if (!isOpen) renderNotifList();
+}
+
+function renderNotifList() {
+  // Disable/enable mark all read button
+  const $markAllBtn = document.getElementById('notif-mark-all');
+  const hasUnread = getUnreadNotifications().length > 0;
+  $markAllBtn.disabled = !hasUnread;
+
+  if (allNotifications.length === 0) {
+    $notifList.innerHTML = '<div class="notif-empty">No notifications yet</div>';
+    return;
+  }
+
+  $notifList.innerHTML = allNotifications
+    .map((n) => {
+      const noteText = n.note ? ' — "' + escapeHtml(n.note) + '"' : '';
+      const envName = n.env_name || 'an environment';
+      const readClass = n.is_read ? ' notif-read' : '';
+      return (
+        '<div class="notif-item' + readClass + '" data-notif-id="' + n.id + '">' +
+        '<div class="notif-content">' +
+        '<strong>' + escapeHtml(n.from_user) + '</strong> reserved ' +
+        '<strong>' + escapeHtml(envName) + '</strong>' +
+        noteText +
+        '</div>' +
+        '<span class="notif-time">' + relativeTime(n.created_at) + '</span>' +
+        '</div>'
+      );
+    })
+    .join('');
+}
+
+async function markAllNotificationsRead() {
+  const unread = getUnreadNotifications();
+  if (unread.length === 0) return;
+
+  const ids = unread.map((n) => n.id);
+
+  try {
+    await fetch(API_BASE + '/notifications', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ notificationIds: ids }),
+    });
+
+    // Mark them as read locally
+    allNotifications.forEach((n) => { n.is_read = true; });
+    renderNotifBadge();
+    renderNotifList();
+
+    // Tell background worker to clear badge
+    chrome.runtime.sendMessage({ type: 'clear-badge' }).catch(() => {});
+  } catch (_) {
+    showError('Failed to mark notifications as read');
+  }
+}
+
+// ============================================
+>>>>>>> e495ff1b65262078fcc78906d8cce4ce0b3463e1
 // Rendering
 // ============================================
 function getActiveEnvs() {
@@ -369,6 +582,7 @@ function renderEnvironments() {
 
       // Details (in-use only)
       if (!isFree) {
+<<<<<<< HEAD
         // Title — shown prominently
         if (env.note) {
           html +=
@@ -379,12 +593,24 @@ function renderEnvironments() {
         html += '<div class="env-details">';
         html +=
           '<span class="env-owner">by ' + escapeHtml(env.owner) + '</span>';
+=======
+        html += '<div class="env-details">';
+        html +=
+          '<span class="env-owner">by ' + escapeHtml(env.owner) + '</span>';
+        if (env.note) {
+          html +=
+            '<span class="env-note">&quot;' +
+            escapeHtml(env.note) +
+            '&quot;</span>';
+        }
+>>>>>>> e495ff1b65262078fcc78906d8cce4ce0b3463e1
         if (isStale) {
           html += '<span class="stale-tag">stale</span>';
         }
         html += '</div>';
       }
 
+<<<<<<< HEAD
       // Reserve title input (shown before confirming reservation)
       if (isFree && reservingEnvId === env.id) {
         html +=
@@ -399,6 +625,8 @@ function renderEnvironments() {
           '</div>';
       }
 
+=======
+>>>>>>> e495ff1b65262078fcc78906d8cce4ce0b3463e1
       // Note editing
       if (editingNoteId === env.id) {
         html +=
@@ -418,12 +646,19 @@ function renderEnvironments() {
       // Action buttons
       html += '<div class="env-actions">';
       if (isFree) {
+<<<<<<< HEAD
         if (reservingEnvId !== env.id) {
           html +=
             '<button class="btn btn-reserve" data-action="start-reserve" data-env-id="' +
             env.id +
             '">Reserve</button>';
         }
+=======
+        html +=
+          '<button class="btn btn-reserve" data-action="reserve" data-env-id="' +
+          env.id +
+          '">Reserve</button>';
+>>>>>>> e495ff1b65262078fcc78906d8cce4ce0b3463e1
       } else {
         html +=
           '<button class="btn btn-release" data-action="release" data-env-id="' +
@@ -438,15 +673,28 @@ function renderEnvironments() {
       }
       html +=
         '<button class="btn btn-history" data-action="toggle-history" data-env-id="' +
+<<<<<<< HEAD
         env.id + '">' +
+=======
+        env.id +
+        '">' +
+>>>>>>> e495ff1b65262078fcc78906d8cce4ce0b3463e1
         (openHistoryId === env.id ? '&#9650;' : '&#9660;') +
         ' History</button>';
       html += '</div>';
 
+<<<<<<< HEAD
       // History panel (last 5 entries only)
       if (openHistoryId === env.id) {
         html +=
           '<div class="history-panel" id="history-' + env.id +
+=======
+      // History panel
+      if (openHistoryId === env.id) {
+        html +=
+          '<div class="history-panel" id="history-' +
+          env.id +
+>>>>>>> e495ff1b65262078fcc78906d8cce4ce0b3463e1
           '"><div class="spinner" style="width:16px;height:16px;border-width:2px;margin:4px auto"></div></div>';
       }
 
@@ -471,6 +719,7 @@ function renderEnvironments() {
     );
     if (inp) inp.focus();
   }
+<<<<<<< HEAD
 
   if (reservingEnvId) {
     const inp = $envList.querySelector(
@@ -478,6 +727,39 @@ function renderEnvironments() {
     );
     if (inp) inp.focus();
   }
+=======
+}
+
+function renderActivity(data) {
+  if (!data || !data.length) {
+    $activity.innerHTML = '<div class="activity-empty">No activity yet</div>';
+    return;
+  }
+
+  $activity.innerHTML = data
+    .map((h) => {
+      const verb =
+        h.action === 'reserve'
+          ? 'reserved'
+          : h.action === 'release'
+            ? 'released'
+            : 'updated note on';
+      const envName =
+        h.environments && h.environments.name ? h.environments.name : '?';
+      return (
+        '<div class="activity-item"><strong>' +
+        escapeHtml(h.user_name) +
+        '</strong> ' +
+        verb +
+        ' <strong>' +
+        escapeHtml(envName) +
+        '</strong> <span class="time">' +
+        relativeTime(h.created_at) +
+        '</span></div>'
+      );
+    })
+    .join('');
+>>>>>>> e495ff1b65262078fcc78906d8cce4ce0b3463e1
 }
 
 // ============================================
@@ -491,6 +773,7 @@ function handleEnvClick(e) {
   const envId = Number(btn.dataset.envId);
 
   switch (action) {
+<<<<<<< HEAD
     case 'start-reserve':
       reservingEnvId = envId;
       renderEnvironments();
@@ -505,6 +788,10 @@ function handleEnvClick(e) {
     case 'cancel-reserve':
       reservingEnvId = null;
       renderEnvironments();
+=======
+    case 'reserve':
+      openReserveModal(envId);
+>>>>>>> e495ff1b65262078fcc78906d8cce4ce0b3463e1
       break;
     case 'release':
       releaseEnv(envId);
@@ -528,6 +815,7 @@ function handleEnvClick(e) {
 }
 
 function handleEnvKeydown(e) {
+<<<<<<< HEAD
   if (e.target.classList.contains('reserve-title-input')) {
     if (e.key === 'Enter') {
       const envId = Number(e.target.dataset.envId);
@@ -540,6 +828,8 @@ function handleEnvKeydown(e) {
     }
     return;
   }
+=======
+>>>>>>> e495ff1b65262078fcc78906d8cce4ce0b3463e1
   if (!e.target.classList.contains('note-input')) return;
   if (e.key === 'Enter') {
     saveNote(Number(e.target.dataset.envId));
@@ -550,6 +840,7 @@ function handleEnvKeydown(e) {
 }
 
 // ============================================
+<<<<<<< HEAD
 // Actions
 // ============================================
 async function reserveEnv(envId, title) {
@@ -560,14 +851,92 @@ async function reserveEnv(envId, title) {
   env.status = 'in-use';
   env.owner = currentUser;
   env.note = title || null;
+=======
+// Reserve modal
+// ============================================
+async function openReserveModal(envId) {
+  const env = allEnvironments.find((e) => e.id === envId);
+  if (!env || env.status === 'in-use') return;
+
+  pendingReserveEnvId = envId;
+  document.getElementById('reserve-env-name').textContent = env.name;
+  document.getElementById('reserve-note-input').value = '';
+
+  // Load QA users for the dropdown
+  const $qaList = document.getElementById('qa-select-list');
+  $qaList.innerHTML = '<div class="spinner" style="width:14px;height:14px;border-width:2px;margin:4px auto"></div>';
+
+  $reserveModal.style.display = 'flex';
+
+  const users = await loadQAUsers();
+  if (users.length === 0) {
+    $qaList.innerHTML = '<div class="qa-empty">No QA users registered yet</div>';
+  } else {
+    $qaList.innerHTML = users
+      .map(
+        (u) =>
+          '<label class="qa-checkbox-label">' +
+          '<input type="checkbox" class="qa-checkbox" value="' +
+          escapeHtml(u.name) +
+          '">' +
+          '<span class="qa-checkbox-custom"></span>' +
+          '<span class="qa-checkbox-name">' +
+          escapeHtml(u.name) +
+          '</span>' +
+          '</label>'
+      )
+      .join('');
+  }
+
+  setTimeout(() => document.getElementById('reserve-note-input').focus(), 50);
+}
+
+function closeReserveModal() {
+  $reserveModal.style.display = 'none';
+  pendingReserveEnvId = null;
+}
+
+async function confirmReserve() {
+  if (!pendingReserveEnvId) return;
+
+  const envId = pendingReserveEnvId;
+  const env = allEnvironments.find((e) => e.id === envId);
+  if (!env || env.status === 'in-use') {
+    closeReserveModal();
+    return;
+  }
+
+  const note = document.getElementById('reserve-note-input').value.trim();
+  const selectedQA = Array.from(document.querySelectorAll('.qa-checkbox:checked')).map(
+    (cb) => cb.value
+  );
+
+  closeReserveModal();
+
+  // Optimistic update
+  env.status = 'in-use';
+  env.owner = currentUser;
+  env.note = note || null;
+>>>>>>> e495ff1b65262078fcc78906d8cce4ce0b3463e1
   env.updated_at = new Date().toISOString();
   renderEnvironments();
 
   try {
+<<<<<<< HEAD
     const res = await fetch(API_BASE + '/reserve', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ envId, user: currentUser }),
+=======
+    const body = { envId, user: currentUser };
+    if (note) body.note = note;
+    if (selectedQA.length > 0) body.notifyQA = selectedQA;
+
+    const res = await fetch(API_BASE + '/reserve', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+>>>>>>> e495ff1b65262078fcc78906d8cce4ce0b3463e1
     });
 
     if (!res.ok) {
@@ -575,6 +944,7 @@ async function reserveEnv(envId, title) {
       throw new Error(data.error || 'Failed to reserve');
     }
 
+<<<<<<< HEAD
     // Save title as note if provided
     if (title) {
       await fetch(API_BASE + '/update-note', {
@@ -586,12 +956,27 @@ async function reserveEnv(envId, title) {
 
     showToast('Reserved ' + env.name);
     await loadEnvironments();
+=======
+    var msg = 'Reserved ' + env.name;
+    if (selectedQA.length > 0) {
+      msg += ' (notified ' + selectedQA.join(', ') + ')';
+    }
+    showToast(msg);
+    await loadEnvironments();
+    loadActivity();
+>>>>>>> e495ff1b65262078fcc78906d8cce4ce0b3463e1
   } catch (err) {
     showToast('Reserve failed: ' + err.message, true);
     await loadEnvironments();
   }
 }
 
+<<<<<<< HEAD
+=======
+// ============================================
+// Actions
+// ============================================
+>>>>>>> e495ff1b65262078fcc78906d8cce4ce0b3463e1
 async function releaseEnv(envId) {
   const env = allEnvironments.find((e) => e.id === envId);
   if (!env || env.status === 'free') return;
@@ -617,6 +1002,10 @@ async function releaseEnv(envId) {
 
     showToast('Released ' + envName);
     await loadEnvironments();
+<<<<<<< HEAD
+=======
+    loadActivity();
+>>>>>>> e495ff1b65262078fcc78906d8cce4ce0b3463e1
   } catch (err) {
     showToast('Release failed: ' + err.message, true);
     await loadEnvironments();
@@ -646,6 +1035,10 @@ async function saveNote(envId) {
     });
 
     await loadEnvironments();
+<<<<<<< HEAD
+=======
+    loadActivity();
+>>>>>>> e495ff1b65262078fcc78906d8cce4ce0b3463e1
   } catch (err) {
     showError('Failed to update note');
     await loadEnvironments();
@@ -668,7 +1061,11 @@ function relativeTime(timestamp) {
 }
 
 function isEnvStale(updatedAt) {
+<<<<<<< HEAD
   return Date.now() - new Date(updatedAt).getTime() > 7 * 24 * 60 * 60 * 1000;
+=======
+  return Date.now() - new Date(updatedAt).getTime() > 4 * 60 * 60 * 1000;
+>>>>>>> e495ff1b65262078fcc78906d8cce4ce0b3463e1
 }
 
 function escapeHtml(str) {

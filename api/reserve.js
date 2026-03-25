@@ -6,7 +6,7 @@ module.exports = cors(async (req, res) => {
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
-  const { envId, user } = req.body;
+  const { envId, user, note, notifyQA } = req.body;
   if (!envId || !user) {
     return res.status(400).json({ error: 'envId and user are required' });
   }
@@ -16,7 +16,7 @@ module.exports = cors(async (req, res) => {
   // Atomically update only if still free
   const { data, error } = await supabase
     .from('environments')
-    .update({ status: 'in-use', owner: user, updated_at: now })
+    .update({ status: 'in-use', owner: user, note: note || null, updated_at: now })
     .eq('id', envId)
     .eq('status', 'free')
     .select()
@@ -31,8 +31,22 @@ module.exports = cors(async (req, res) => {
     env_id: envId,
     action: 'reserve',
     user_name: user,
+    note: note || null,
     created_at: now
   });
+
+  // Notify selected QA users
+  if (notifyQA && Array.isArray(notifyQA) && notifyQA.length > 0) {
+    const notifications = notifyQA.map((qaUser) => ({
+      env_id: envId,
+      from_user: user,
+      to_user: qaUser,
+      note: note || null,
+      env_name: data.name,
+      created_at: now
+    }));
+    await supabase.from('notifications').insert(notifications);
+  }
 
   res.json(data);
 });
