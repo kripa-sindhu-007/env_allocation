@@ -15,6 +15,7 @@ const GROUPS = Object.keys(NAV);
 // State
 // ============================================
 let currentUser = null;
+let currentRole = null;
 let allEnvironments = [];
 let activeGroup = GROUPS[0];
 let activeSubTab = NAV[activeGroup][0];
@@ -22,6 +23,9 @@ let openHistoryId = null;
 let editingNoteId = null;
 let searchQuery = '';
 let refreshTimer = null;
+let pendingReserveEnvId = null;
+let qaUsers = [];
+let allNotifications = [];
 
 // ============================================
 // DOM refs
@@ -36,6 +40,11 @@ const $activity = document.getElementById('activity-list');
 const $userDisplay = document.getElementById('user-display');
 const $loading = document.getElementById('loading');
 const $error = document.getElementById('error-banner');
+const $reserveModal = document.getElementById('reserve-modal');
+const $notifWrapper = document.getElementById('notif-wrapper');
+const $notifBadge = document.getElementById('notif-badge');
+const $notifDropdown = document.getElementById('notif-dropdown');
+const $notifList = document.getElementById('notif-list');
 
 // ============================================
 // Init
@@ -45,6 +54,7 @@ document.addEventListener('DOMContentLoaded', init);
 async function init() {
   const stored = await chrome.storage.local.get([
     'username',
+    'userRole',
     'activeGroup',
     'activeSubTab',
   ]);
@@ -60,8 +70,9 @@ async function init() {
   } else {
     activeSubTab = NAV[activeGroup][0];
   }
-  if (stored.username) {
+  if (stored.username && stored.userRole) {
     currentUser = stored.username;
+    currentRole = stored.userRole;
     showApp();
   } else {
     showModal();
@@ -69,7 +80,7 @@ async function init() {
 }
 
 // ============================================
-// Username modal
+// Username + Role modal
 // ============================================
 function showModal() {
   $modal.style.display = 'flex';
@@ -77,16 +88,26 @@ function showModal() {
 
   const input = document.getElementById('username-input');
   const btn = document.getElementById('username-save');
+  const roleBtns = document.querySelectorAll('.role-btn');
+  let selectedRole = 'developer';
 
-  btn.addEventListener('click', saveUsername);
+  roleBtns.forEach((rb) => {
+    rb.addEventListener('click', () => {
+      roleBtns.forEach((b) => b.classList.remove('active'));
+      rb.classList.add('active');
+      selectedRole = rb.dataset.role;
+    });
+  });
+
+  btn.addEventListener('click', () => saveUsername(selectedRole));
   input.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') saveUsername();
+    if (e.key === 'Enter') saveUsername(selectedRole);
   });
 
   setTimeout(() => input.focus(), 50);
 }
 
-async function saveUsername() {
+async function saveUsername(role) {
   const input = document.getElementById('username-input');
   const name = input.value.trim();
   if (!name) {
@@ -95,7 +116,20 @@ async function saveUsername() {
   }
 
   currentUser = name;
-  await chrome.storage.local.set({ username: name });
+  currentRole = role;
+  await chrome.storage.local.set({ username: name, userRole: role });
+
+  // Register user in backend
+  try {
+    await fetch(API_BASE + '/users', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, role }),
+    });
+  } catch (_) {
+    // Non-blocking — user can still use the app
+  }
+
   showApp();
 }
 
@@ -107,6 +141,12 @@ function showApp() {
   $app.style.display = 'block';
   $userDisplay.textContent = currentUser;
 
+  // Show notification bell for QA users
+  if (currentRole === 'qa') {
+    $notifWrapper.style.display = 'block';
+    loadNotifications();
+  }
+
   renderNav();
   loadEnvironments();
   loadActivity();
@@ -115,12 +155,14 @@ function showApp() {
   refreshTimer = setInterval(() => {
     loadEnvironments();
     loadActivity();
+    if (currentRole === 'qa') loadNotifications();
   }, 30000);
 
   // Manual refresh
   document.getElementById('refresh-btn').addEventListener('click', () => {
     loadEnvironments();
     loadActivity();
+    if (currentRole === 'qa') loadNotifications();
   });
 
   // Click username to edit
@@ -130,6 +172,12 @@ function showApp() {
       currentUser = newName.trim();
       chrome.storage.local.set({ username: currentUser });
       $userDisplay.textContent = currentUser;
+      // Update backend
+      fetch(API_BASE + '/users', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: currentUser, role: currentRole }),
+      }).catch(() => {});
     }
   });
 
@@ -144,6 +192,21 @@ function showApp() {
   $tabs.addEventListener('click', handleTabClick);
   $envList.addEventListener('click', handleEnvClick);
   $envList.addEventListener('keydown', handleEnvKeydown);
+
+  // Reserve modal events
+  document.getElementById('reserve-confirm').addEventListener('click', confirmReserve);
+  document.getElementById('reserve-cancel').addEventListener('click', closeReserveModal);
+
+  // Notification bell events
+  document.getElementById('notif-btn').addEventListener('click', toggleNotifDropdown);
+  document.getElementById('notif-mark-all').addEventListener('click', markAllNotificationsRead);
+
+  // Close notification dropdown on outside click
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest('.notif-wrapper')) {
+      $notifDropdown.style.display = 'none';
+    }
+  });
 }
 
 // ============================================
@@ -306,6 +369,112 @@ async function loadHistory(envId) {
       .join('');
   } catch (_) {
     panel.innerHTML = '<div class="history-empty">Failed to load</div>';
+  }
+}
+
+// ============================================
+// QA Users loading (for reserve modal)
+// ============================================
+async function loadQAUsers() {
+  try {
+    const res = await fetch(API_BASE + '/users?role=qa');
+    if (!res.ok) return [];
+    qaUsers = await res.json();
+    return qaUsers;
+  } catch (_) {
+    return [];
+  }
+}
+
+// ============================================
+// Notifications
+// ============================================
+async function loadNotifications() {
+  try {
+    const res = await fetch(
+      API_BASE + '/notifications?user=' + encodeURIComponent(currentUser)
+    );
+    if (!res.ok) return;
+    allNotifications = await res.json();
+    renderNotifBadge();
+  } catch (_) {
+    // Silent fail
+  }
+}
+
+function getUnreadNotifications() {
+  return allNotifications.filter((n) => !n.is_read);
+}
+
+function renderNotifBadge() {
+  const count = getUnreadNotifications().length;
+  if (count > 0) {
+    $notifBadge.textContent = count > 99 ? '99+' : String(count);
+    $notifBadge.style.display = 'flex';
+  } else {
+    $notifBadge.style.display = 'none';
+  }
+}
+
+function toggleNotifDropdown(e) {
+  e.stopPropagation();
+  const isOpen = $notifDropdown.style.display === 'block';
+  $notifDropdown.style.display = isOpen ? 'none' : 'block';
+  if (!isOpen) renderNotifList();
+}
+
+function renderNotifList() {
+  // Disable/enable mark all read button
+  const $markAllBtn = document.getElementById('notif-mark-all');
+  const hasUnread = getUnreadNotifications().length > 0;
+  $markAllBtn.disabled = !hasUnread;
+
+  if (allNotifications.length === 0) {
+    $notifList.innerHTML = '<div class="notif-empty">No notifications yet</div>';
+    return;
+  }
+
+  $notifList.innerHTML = allNotifications
+    .map((n) => {
+      const noteText = n.note ? ' — "' + escapeHtml(n.note) + '"' : '';
+      const envName = n.env_name || 'an environment';
+      const readClass = n.is_read ? ' notif-read' : '';
+      return (
+        '<div class="notif-item' + readClass + '" data-notif-id="' + n.id + '">' +
+        '<div class="notif-content">' +
+        '<strong>' + escapeHtml(n.from_user) + '</strong> reserved ' +
+        '<strong>' + escapeHtml(envName) + '</strong>' +
+        noteText +
+        '</div>' +
+        '<span class="notif-time">' + relativeTime(n.created_at) + '</span>' +
+        '</div>'
+      );
+    })
+    .join('');
+}
+
+async function markAllNotificationsRead() {
+  const unread = getUnreadNotifications();
+  if (unread.length === 0) return;
+
+  const ids = unread.map((n) => n.id);
+
+  try {
+    await fetch(API_BASE + '/notifications', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ notificationIds: ids }),
+    });
+
+    // Mark them as read locally
+    allNotifications.forEach((n) => { n.is_read = true; });
+    renderNotifBadge();
+    renderNotifList();
+
+    // Tell background worker to clear badge
+    chrome.runtime.sendMessage({ type: 'clear-badge' }).catch(() => {});
+  } catch (_) {
+    showError('Failed to mark notifications as read');
   }
 }
 
@@ -506,7 +675,7 @@ function handleEnvClick(e) {
 
   switch (action) {
     case 'reserve':
-      reserveEnv(envId);
+      openReserveModal(envId);
       break;
     case 'release':
       releaseEnv(envId);
@@ -540,23 +709,83 @@ function handleEnvKeydown(e) {
 }
 
 // ============================================
-// Actions
+// Reserve modal
 // ============================================
-async function reserveEnv(envId) {
+async function openReserveModal(envId) {
   const env = allEnvironments.find((e) => e.id === envId);
   if (!env || env.status === 'in-use') return;
+
+  pendingReserveEnvId = envId;
+  document.getElementById('reserve-env-name').textContent = env.name;
+  document.getElementById('reserve-note-input').value = '';
+
+  // Load QA users for the dropdown
+  const $qaList = document.getElementById('qa-select-list');
+  $qaList.innerHTML = '<div class="spinner" style="width:14px;height:14px;border-width:2px;margin:4px auto"></div>';
+
+  $reserveModal.style.display = 'flex';
+
+  const users = await loadQAUsers();
+  if (users.length === 0) {
+    $qaList.innerHTML = '<div class="qa-empty">No QA users registered yet</div>';
+  } else {
+    $qaList.innerHTML = users
+      .map(
+        (u) =>
+          '<label class="qa-checkbox-label">' +
+          '<input type="checkbox" class="qa-checkbox" value="' +
+          escapeHtml(u.name) +
+          '">' +
+          '<span class="qa-checkbox-custom"></span>' +
+          '<span class="qa-checkbox-name">' +
+          escapeHtml(u.name) +
+          '</span>' +
+          '</label>'
+      )
+      .join('');
+  }
+
+  setTimeout(() => document.getElementById('reserve-note-input').focus(), 50);
+}
+
+function closeReserveModal() {
+  $reserveModal.style.display = 'none';
+  pendingReserveEnvId = null;
+}
+
+async function confirmReserve() {
+  if (!pendingReserveEnvId) return;
+
+  const envId = pendingReserveEnvId;
+  const env = allEnvironments.find((e) => e.id === envId);
+  if (!env || env.status === 'in-use') {
+    closeReserveModal();
+    return;
+  }
+
+  const note = document.getElementById('reserve-note-input').value.trim();
+  const selectedQA = Array.from(document.querySelectorAll('.qa-checkbox:checked')).map(
+    (cb) => cb.value
+  );
+
+  closeReserveModal();
 
   // Optimistic update
   env.status = 'in-use';
   env.owner = currentUser;
+  env.note = note || null;
   env.updated_at = new Date().toISOString();
   renderEnvironments();
 
   try {
+    const body = { envId, user: currentUser };
+    if (note) body.note = note;
+    if (selectedQA.length > 0) body.notifyQA = selectedQA;
+
     const res = await fetch(API_BASE + '/reserve', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ envId, user: currentUser }),
+      body: JSON.stringify(body),
     });
 
     if (!res.ok) {
@@ -564,7 +793,11 @@ async function reserveEnv(envId) {
       throw new Error(data.error || 'Failed to reserve');
     }
 
-    showToast('Reserved ' + env.name);
+    var msg = 'Reserved ' + env.name;
+    if (selectedQA.length > 0) {
+      msg += ' (notified ' + selectedQA.join(', ') + ')';
+    }
+    showToast(msg);
     await loadEnvironments();
     loadActivity();
   } catch (err) {
@@ -573,6 +806,9 @@ async function reserveEnv(envId) {
   }
 }
 
+// ============================================
+// Actions
+// ============================================
 async function releaseEnv(envId) {
   const env = allEnvironments.find((e) => e.id === envId);
   if (!env || env.status === 'free') return;
@@ -651,7 +887,7 @@ function relativeTime(timestamp) {
 }
 
 function isEnvStale(updatedAt) {
-  return Date.now() - new Date(updatedAt).getTime() > 7 * 24 * 60 * 60 * 1000;
+  return Date.now() - new Date(updatedAt).getTime() > 4 * 60 * 60 * 1000;
 }
 
 function escapeHtml(str) {
