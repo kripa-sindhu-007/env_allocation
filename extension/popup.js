@@ -651,7 +651,7 @@ function relativeTime(timestamp) {
 }
 
 function isEnvStale(updatedAt) {
-  return Date.now() - new Date(updatedAt).getTime() > 4 * 60 * 60 * 1000;
+  return Date.now() - new Date(updatedAt).getTime() > 7 * 24 * 60 * 60 * 1000;
 }
 
 function escapeHtml(str) {
