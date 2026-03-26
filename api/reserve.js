@@ -1,12 +1,13 @@
 const supabase = require('./_lib/supabase');
 const cors = require('./_lib/cors');
+const purgeHistory = require('./_lib/purgeHistory');
 
 module.exports = cors(async (req, res) => {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
-  const { envId, user, note, notifyQA } = req.body;
+  const { envId, user, userId, note, notifyQA } = req.body;
   if (!envId || !user) {
     return res.status(400).json({ error: 'envId and user are required' });
   }
@@ -26,7 +27,7 @@ module.exports = cors(async (req, res) => {
     return res.status(409).json({ error: 'Environment is not available' });
   }
 
-  // Record history
+  // Record history and prune old entries
   await supabase.from('history').insert({
     env_id: envId,
     action: 'reserve',
@@ -34,13 +35,14 @@ module.exports = cors(async (req, res) => {
     note: note || null,
     created_at: now
   });
+  purgeHistory(envId).catch(() => {});
 
-  // Notify selected QA users
+  // Notify selected QA users (notifyQA contains user IDs)
   if (notifyQA && Array.isArray(notifyQA) && notifyQA.length > 0) {
-    const notifications = notifyQA.map((qaUser) => ({
+    const notifications = notifyQA.map((qaUserId) => ({
       env_id: envId,
       from_user: user,
-      to_user: qaUser,
+      to_user: qaUserId,
       note: note || null,
       env_name: data.name,
       created_at: now

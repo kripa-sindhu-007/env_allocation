@@ -33,16 +33,16 @@ async function checkForNotifications() {
   isChecking = true;
 
   try {
-    const stored = await chrome.storage.local.get(['username', 'userRole', 'shownNotifIds']);
-    const username = stored.username;
+    const stored = await chrome.storage.local.get(['userId', 'userRole', 'shownNotifIds']);
+    const userId = stored.userId;
     const role = stored.userRole;
     const shownIds = stored.shownNotifIds || [];
 
     // Only poll for QA users
-    if (!username || role !== 'qa') return;
+    if (!userId || role !== 'qa') return;
 
     const res = await fetch(
-      API_BASE + '/notifications?user=' + encodeURIComponent(username)
+      API_BASE + '/notifications?userId=' + encodeURIComponent(userId)
     );
     if (!res.ok) return;
 
@@ -83,7 +83,8 @@ async function checkForNotifications() {
     }
 
     if (hasNew) {
-      await chrome.storage.local.set({ shownNotifIds: Array.from(shownSet) });
+      const pruned = Array.from(shownSet).slice(-20);
+      await chrome.storage.local.set({ shownNotifIds: pruned });
     }
   } catch (_) {
     // Silently fail — will retry on next alarm

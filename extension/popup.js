@@ -23,6 +23,7 @@ const TAB_TITLES = {
 // State
 // ============================================
 let currentUser = null;
+let currentUserId = null;
 let currentRole = null;
 let allEnvironments = [];
 let activeGroup = GROUPS[0];
@@ -62,6 +63,7 @@ document.addEventListener('DOMContentLoaded', init);
 async function init() {
   const stored = await chrome.storage.local.get([
     'username',
+    'userId',
     'userRole',
     'activeGroup',
     'activeSubTab',
@@ -78,8 +80,9 @@ async function init() {
   } else {
     activeSubTab = NAV[activeGroup][0];
   }
-  if (stored.username && stored.userRole) {
+  if (stored.username && stored.userRole && stored.userId) {
     currentUser = stored.username;
+    currentUserId = stored.userId;
     currentRole = stored.userRole;
     showApp();
   } else {
@@ -97,6 +100,7 @@ function showModal() {
   const input = document.getElementById('username-input');
   const btn = document.getElementById('username-save');
   const roleBtns = document.querySelectorAll('.role-btn');
+  const pinBoxes = document.querySelectorAll('.pin-box');
   let selectedRole = 'developer';
 
   roleBtns.forEach((rb) => {
@@ -107,9 +111,41 @@ function showModal() {
     });
   });
 
+  // PIN auto-advance
+  pinBoxes.forEach((box, i) => {
+    box.addEventListener('input', () => {
+      box.value = box.value.replace(/[^0-9]/g, '');
+      box.classList.toggle('filled', !!box.value);
+      if (box.value && i < pinBoxes.length - 1) {
+        pinBoxes[i + 1].focus();
+      }
+    });
+    box.addEventListener('keydown', (e) => {
+      if (e.key === 'Backspace' && !box.value && i > 0) {
+        pinBoxes[i - 1].value = '';
+        pinBoxes[i - 1].classList.remove('filled');
+        pinBoxes[i - 1].focus();
+      }
+      if (e.key === 'Enter') saveUsername(selectedRole);
+    });
+    // Handle paste on any box — fill all 4 from pasted digits
+    box.addEventListener('paste', (e) => {
+      e.preventDefault();
+      const digits = (e.clipboardData.getData('text') || '').replace(/[^0-9]/g, '').slice(0, 4);
+      digits.split('').forEach((d, j) => {
+        if (pinBoxes[j]) {
+          pinBoxes[j].value = d;
+          pinBoxes[j].classList.add('filled');
+        }
+      });
+      const next = pinBoxes[Math.min(digits.length, pinBoxes.length - 1)];
+      if (next) next.focus();
+    });
+  });
+
   btn.addEventListener('click', () => saveUsername(selectedRole));
   input.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') saveUsername(selectedRole);
+    if (e.key === 'Enter') pinBoxes[0].focus();
   });
 
   setTimeout(() => input.focus(), 50);
@@ -117,28 +153,56 @@ function showModal() {
 
 async function saveUsername(role) {
   const input = document.getElementById('username-input');
+  const $err = document.getElementById('modal-error');
+  const pinBoxes = document.querySelectorAll('.pin-box');
   const name = input.value.trim();
+  const pin = Array.from(pinBoxes).map((b) => b.value).join('');
+
   if (!name) {
     input.focus();
     return;
   }
-
-  currentUser = name;
-  currentRole = role;
-  await chrome.storage.local.set({ username: name, userRole: role });
-
-  // Register user in backend
-  try {
-    await fetch(API_BASE + '/users', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, role }),
-    });
-  } catch (_) {
-    // Non-blocking — user can still use the app
+  if (pin.length !== 4) {
+    $err.textContent = 'Please enter your 4-digit PIN';
+    $err.style.display = 'block';
+    pinBoxes[pin.length] ? pinBoxes[pin.length].focus() : pinBoxes[0].focus();
+    return;
   }
 
-  showApp();
+  $err.textContent = '';
+  $err.style.display = 'none';
+
+  try {
+    const res = await fetch(API_BASE + '/users', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, role, pin }),
+    });
+
+    if (!res.ok) {
+      const data = await res.json();
+      $err.textContent = data.error || 'Registration failed';
+      $err.style.display = 'block';
+      return;
+    }
+
+    const user = await res.json();
+    currentUser = user.name;
+    currentUserId = user.id;
+    currentRole = user.role;
+    await chrome.storage.local.set({ username: currentUser, userId: currentUserId, userRole: currentRole });
+
+    showApp();
+    if (user.restored) {
+      showToast('Welcome back, ' + currentUser + '!');
+    }
+  } catch (_) {
+    // Offline fallback — let them in without backend confirmation
+    currentUser = name;
+    currentRole = role;
+    await chrome.storage.local.set({ username: name, userRole: role });
+    showApp();
+  }
 }
 
 // ============================================
@@ -331,7 +395,7 @@ async function loadEnvironments() {
   }
 }
 
-const HISTORY_LIMIT = 5;
+const HISTORY_LIMIT = 20;
 async function loadActivity() {
   try {
     const res = await fetch(
@@ -382,7 +446,7 @@ async function loadHistory(envId) {
       .join('');
 
     // Ask the server to purge entries beyond the limit
-    fetch(API_BASE + '/history/purge', {
+    fetch(API_BASE + '/history', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ envId, keepLast: HISTORY_LIMIT }),
@@ -412,7 +476,7 @@ async function loadQAUsers() {
 async function loadNotifications() {
   try {
     const res = await fetch(
-      API_BASE + '/notifications?user=' + encodeURIComponent(currentUser)
+      API_BASE + '/notifications?userId=' + encodeURIComponent(currentUserId)
     );
     if (!res.ok) return;
     allNotifications = await res.json();
@@ -629,7 +693,19 @@ function renderEnvironments() {
     });
   }
 
-  if (envs.length === 0 && searchQuery) {
+  if (searchQuery === 'whoami') {
+    html +=
+      '<div class="whoami-egg">' +
+      '<div class="whoami-line"><span class="whoami-prompt">$</span> whoami</div>' +
+      '<div class="whoami-output">' +
+      '<span class="whoami-field">user</span><span class="whoami-sep">::</span><span class="whoami-val">kripa sindhu</span>' +
+      '</div>' +
+      '<div class="whoami-output">' +
+      '<span class="whoami-field">role</span><span class="whoami-sep">::</span><span class="whoami-val">built this</span>' +
+      '</div>' +
+      '<div class="whoami-cursor">_</div>' +
+      '</div>';
+  } else if (envs.length === 0 && searchQuery) {
     html += '<div class="no-results">No environments match "' + escapeHtml(searchQuery) + '"</div>';
   }
 
@@ -749,7 +825,7 @@ async function openReserveModal(envId) {
         (u) =>
           '<label class="qa-checkbox-label">' +
           '<input type="checkbox" class="qa-checkbox" value="' +
-          escapeHtml(u.name) +
+          escapeHtml(u.id) +
           '">' +
           '<span class="qa-checkbox-custom"></span>' +
           '<span class="qa-checkbox-name">' +
@@ -793,7 +869,7 @@ async function confirmReserve() {
   renderEnvironments();
 
   try {
-    const body = { envId, user: currentUser };
+    const body = { envId, user: currentUser, userId: currentUserId };
     if (note) body.note = note;
     if (selectedQA.length > 0) body.notifyQA = selectedQA;
 
@@ -810,7 +886,11 @@ async function confirmReserve() {
 
     var msg = 'Reserved ' + env.name;
     if (selectedQA.length > 0) {
-      msg += ' (notified ' + selectedQA.join(', ') + ')';
+      const notifiedNames = selectedQA.map((id) => {
+        const u = qaUsers.find((q) => String(q.id) === String(id));
+        return u ? u.name : id;
+      });
+      msg += ' (notified ' + notifiedNames.join(', ') + ')';
     }
     showToast(msg);
     await loadEnvironments();
@@ -902,7 +982,7 @@ function relativeTime(timestamp) {
 }
 
 function isEnvStale(updatedAt) {
-  return Date.now() - new Date(updatedAt).getTime() > 4 * 60 * 60 * 1000;
+  return Date.now() - new Date(updatedAt).getTime() > 7 * 24 * 60 * 60 * 1000;
 }
 
 function escapeHtml(str) {

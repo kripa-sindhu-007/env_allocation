@@ -2,17 +2,17 @@ const supabase = require('./_lib/supabase');
 const cors = require('./_lib/cors');
 
 module.exports = cors(async (req, res) => {
-  // GET: fetch unread notifications for a user
+  // GET: fetch notifications for a user
   if (req.method === 'GET') {
-    const { user } = req.query;
-    if (!user) {
-      return res.status(400).json({ error: 'user query param is required' });
+    const { userId } = req.query;
+    if (!userId) {
+      return res.status(400).json({ error: 'userId query param is required' });
     }
 
     const { data, error } = await supabase
       .from('notifications')
       .select('*')
-      .eq('to_user', user)
+      .eq('to_user', userId)
       .order('created_at', { ascending: false })
       .limit(20);
 

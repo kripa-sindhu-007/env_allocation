@@ -17,6 +17,16 @@
       <h2>env<span class="blink">_</span>manager</h2>
       <p>identify yourself</p>
       <input type="text" id="username-input" placeholder="your_name" autocomplete="off" spellcheck="false">
+      <div class="pin-group">
+        <span class="pin-label">4-digit PIN</span>
+        <div class="pin-boxes">
+          <input class="pin-box" id="pin-0" type="password" maxlength="1" inputmode="numeric" autocomplete="off">
+          <input class="pin-box" id="pin-1" type="password" maxlength="1" inputmode="numeric" autocomplete="off">
+          <input class="pin-box" id="pin-2" type="password" maxlength="1" inputmode="numeric" autocomplete="off">
+          <input class="pin-box" id="pin-3" type="password" maxlength="1" inputmode="numeric" autocomplete="off">
+        </div>
+      </div>
+      <p id="modal-error" class="modal-error"></p>
       <div class="role-selector">
         <button class="role-btn active" data-role="developer">Developer</button>
         <button class="role-btn" data-role="qa">QA</button>

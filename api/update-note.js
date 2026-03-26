@@ -1,5 +1,6 @@
 const supabase = require('./_lib/supabase');
 const cors = require('./_lib/cors');
+const purgeHistory = require('./_lib/purgeHistory');
 
 module.exports = cors(async (req, res) => {
   if (req.method !== 'POST') {
@@ -31,6 +32,7 @@ module.exports = cors(async (req, res) => {
     note: note || null,
     created_at: now
   });
+  purgeHistory(envId).catch(() => {});
 
   res.json(data);
 });
