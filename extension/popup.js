@@ -816,24 +816,28 @@ async function openReserveModal(envId) {
 
   $reserveModal.style.display = 'flex';
 
-  const users = await loadQAUsers();
-  if (users.length === 0) {
-    $qaList.innerHTML = '<div class="qa-empty">No QA users registered yet</div>';
-  } else {
-    $qaList.innerHTML = users
-      .map(
-        (u) =>
-          '<label class="qa-checkbox-label">' +
-          '<input type="checkbox" class="qa-checkbox" value="' +
-          escapeHtml(u.id) +
-          '">' +
-          '<span class="qa-checkbox-custom"></span>' +
-          '<span class="qa-checkbox-name">' +
-          escapeHtml(u.name) +
-          '</span>' +
-          '</label>'
-      )
-      .join('');
+  try {
+    const users = await loadQAUsers();
+    if (!users || users.length === 0) {
+      $qaList.innerHTML = '<div class="qa-empty">No QA users registered yet</div>';
+    } else {
+      $qaList.innerHTML = users
+        .map(
+          (u) =>
+            '<label class="qa-checkbox-label">' +
+            '<input type="checkbox" class="qa-checkbox" value="' +
+            escapeHtml(String(u.id)) +
+            '">' +
+            '<span class="qa-checkbox-custom"></span>' +
+            '<span class="qa-checkbox-name">' +
+            escapeHtml(u.name) +
+            '</span>' +
+            '</label>'
+        )
+        .join('');
+    }
+  } catch (_) {
+    $qaList.innerHTML = '<div class="qa-empty">Could not load QA users</div>';
   }
 
   setTimeout(() => document.getElementById('reserve-note-input').focus(), 50);
