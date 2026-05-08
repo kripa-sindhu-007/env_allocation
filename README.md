@@ -29,37 +29,19 @@ Supabase (PostgreSQL)
 ### 1. Supabase
 
 1. Create a project at [supabase.com](https://supabase.com)
-2. Go to **SQL Editor** and run the schema below
+2. Go to **SQL Editor** and run [`supabase/schema.sql`](./supabase/schema.sql) — it creates all four tables (`environments`, `history`, `users`, `notifications`), constraints, indexes, and seeds the environment list.
 3. Copy your **Project URL** and **service_role key** from **Settings → API**
 
-#### Database Schema
+#### Tables
 
-```sql
--- Environments table (create manually or via schema.sql)
+| Table           | Purpose                                                          |
+|-----------------|------------------------------------------------------------------|
+| `environments`  | The reservable envs across 4 categories (Backend/Frontend × API/Portal/PWA) |
+| `history`       | Append-only log of `reserve` / `release` / `note-update` actions |
+| `users`         | Registered developers and QA, with a 4-digit PIN for restore     |
+| `notifications` | QA pings created when a developer reserves an env                |
 
--- Users table
-CREATE TABLE users (
-  id BIGSERIAL PRIMARY KEY,
-  name TEXT UNIQUE NOT NULL,
-  role TEXT NOT NULL CHECK (role IN ('developer', 'qa')),
-  created_at TIMESTAMPTZ DEFAULT NOW()
-);
-
--- Notifications table
-CREATE TABLE notifications (
-  id BIGSERIAL PRIMARY KEY,
-  env_id BIGINT REFERENCES environments(id) ON DELETE CASCADE,
-  from_user TEXT NOT NULL,
-  to_user TEXT NOT NULL,
-  note TEXT,
-  env_name TEXT,
-  is_read BOOLEAN DEFAULT FALSE,
-  created_at TIMESTAMPTZ DEFAULT NOW()
-);
-
-CREATE INDEX idx_notifications_to_user_unread
-  ON notifications(to_user, is_read) WHERE is_read = FALSE;
-```
+The four categories are `Backend-APIs`, `Backend-Portal`, `Frontend-PWA`, `Frontend-Portal`. Seeded env names cover `test-1..20`, `alpha-1..3`, `main-alpha`, and `uat-beatroute` / `uat-sandbox` (with PWA receiving a reduced subset).
 
 ### 2. Vercel Backend
 
@@ -129,15 +111,17 @@ Your API is now live at `https://your-app.vercel.app/api`.
 
 **Update note:** `{ "envId": 1, "user": "Kripa", "note": "Testing login" }`
 
-**Register user:** `{ "name": "Kripa", "role": "developer" }`
+**Register / restore user:** `{ "name": "Kripa", "role": "developer", "pin": "1234" }` — `pin` must be exactly 4 digits. If `name` already exists, the matching `pin` restores the user (`restored: true`); a wrong `pin` returns `409`.
 
 **Mark notifications read:** `{ "notificationIds": [1, 2, 3] }`
 
 **History (per-env):** `GET /api/history?envId=1`
 
+**History (per-category):** `GET /api/history?category=Backend-APIs`
+
 **Users (QA only):** `GET /api/users?role=qa`
 
-**Notifications:** `GET /api/notifications?user=qa_user1`
+**Notifications:** `GET /api/notifications?userId=<user_name>`
 
 ## Project Structure
 
